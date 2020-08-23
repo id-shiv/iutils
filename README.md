@@ -1,3 +1,3 @@
-# nlplib
+# iutils
 
-Modules for Natural Language Processing
+Modules for problems solving with Machine Learning
