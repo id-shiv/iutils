@@ -1,4 +1,4 @@
-# Problem ------------------------------------------------------
+#region Problem ------------------------------------------------------
 # For a given sentence pair a most relavent sentence.
 #
 # Reference
@@ -22,40 +22,174 @@
 #### BERT or Universal Sentence Encoder (USE) are text encoders that already have  
 #### Called as `Nearest Neighbour Search` problem (latest search of Elastic search has already implemented Nearest Neighbour Search)
 #### Hence the final search would be Keyword + Vector (Nearest Neighbour) on ES returning ranked set of relevant sentences
+#
+# Requirements
+# pip3 install --upgrade pip
+# pip3 install elasticsearch
+# pip3 install pandas
+# pip3 install --upgrade --no-cache-dir tensorflow
+# pip3 install --upgrade tensorflow-hub
 
-DATA_PATH = '/Users/shiv/Documents/gitRepositories/iutils/input/data/IMDB Dataset.csv'
+#endregion
+
+from elasticsearch import Elasticsearch
+import tensorflow as tf
+import tensorflow_hub as hub
 
 import pandas as pd
 from tqdm import tqdm
 
-if __name__=='__main__':
+
+def get_data(data_path: str, text_column: str):
     # Read the dataset and retrieve sentences
-    data = pd.read_csv(DATA_PATH)['review'].head(10000)
+    data = pd.read_csv(data_path)
+    data[text_column] = data[text_column].apply(lambda x: x.split('.')[0])
 
-    # Create a sentence id (document id) created for each of the sentence
-    # In our case, convert the index into id
-    data = data.reset_index()
-    data = data.rename(columns = {'index': 'id'}, inplace = False)
-    data['id']= data['id'].astype(str)
-    data = data.rename(columns = {'review': 'text'}, inplace = False)
-    data['text']= data['text'].apply(lambda x: x.split('.')[0])
+    return data
 
-    # print(data.head())
+def db_setup(hostname: str, port: int):
+	# connect to ES on localhost on port 9200
+	es = Elasticsearch([{'host': hostname, 'port': port}])
+	if es.ping():
+		print('Connected to ES!')
+	else:
+		print('Could not connect!')
 
-    # Inverted Index
-    db = Database()
-    index = InvertedIndex(db)
-    for i in tqdm(data.index):
-        sentence = {'id': data.loc[i]['id'], 'text': data.loc[i]['text']}
-        index.index_document(sentence)
+	# index in ES = DB in an RDBMS
+	# Read each question and index into an index called questions
+	# Define the index
 
-    # Search new sentence
-    result = index.lookup_query('pretty amazing cinematography')
+	# Refer: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping.html
+	# Mapping: Structure of the index
+	# Property/Field: name and type  
+	b = {"mappings": {
+            "properties": {
+                    "title": {
+                        "type": "text"
+                    },
+                    "title_vector": {
+                        "type": "dense_vector",
+                        "dims": 512
+                }
+            }
+		}
+	}
 
-    # Print the results
-    for term in result.keys():
-        print(f'{term} ------------------------')
-        for appearance in result[term]:
-            document = db.get(appearance.docId)
-            print(appearance.docId)
-            print(document['text'])
+	ret = es.indices.create(index='sentences-index', ignore=400, body=b) # 400 caused by IndexAlreadyExistsException, 
+	print(json.dumps(ret,indent=4))
+
+	# TRY this in browser: http://localhost:9200/questions-index
+
+def db_connect(hostname: str, port: int):
+    # connect to ES on localhost on port 9200
+	es = Elasticsearch([{'host': hostname, 'port': port}])
+	if es.ping():
+		print('Connected to ES!')
+	else:
+		print('Could not connect!')
+	return es
+
+def db_insert(database, sentence_id: int, sentence: str, sentence_vector: list()):
+	b = {
+            "title":sentence,
+		    "title_vector":sentence_vector
+		}	
+	database.index(index="sentences-index", id=sentence_id, body=b)
+	# View details: http://localhost:9200/questions-index/_stats?pretty
+    # View a document: http://localhost:9200/questions-index/_doc/1
+
+def encode(encoder, text):
+    embeddings = tf.make_ndarray(tf.make_tensor_proto(encoder([text]))).tolist()[0]
+
+    # Return a vector of 512 dimensions as a list
+    return embeddings
+
+def insert_encoded_data_to_db(database, data, text_column):
+    # Encode and insert sentence ID, sentence and it's vector in Database
+    for index, row in tqdm(data.iterrows()):
+        sentence = row[text_column]
+        sentence_vector = encode(_encoder, sentence)
+        sentence_id = index
+        db_insert(es, sentence_id, sentence, sentence_vector)
+
+def search_by_keyword(database, sentence):
+    # Search by Keywords
+    b=  {
+            'query':{
+                'match':{
+                    "title":sentence
+                }
+            }
+        }
+
+    res= database.search(index='sentences-index',body=b)
+    print("Keyword Search:\n")
+    scores = list()
+    for hit in res['hits']['hits']:
+        print(str(hit['_score']) + "\t" + hit['_source']['title'] )
+        scores.append(hit['_score'])
+    
+    import numpy as np
+    print(scores)
+    print([score/np.max(scores) for score in scores])
+
+    print("*********************************************************************************");
+
+    return
+
+def search_by_vector(database, query_vector):
+    # Search by Vector Similarity
+    b = {
+            "query": {
+                "script_score": {
+                "query": {"match_all": {}},
+                "script": {
+                    "source": "cosineSimilarity(params.query_vector, 'title_vector') + 1.0",
+                    "params": {"query_vector": query_vector}
+                }
+            }
+        }
+    }
+
+    # print(json.dumps(b,indent=4))
+    res= database.search(index='sentences-index', body=b)
+
+    print("Semantic Similarity Search:\n")
+    for hit in res['hits']['hits']:
+        print(str(hit['_score']) + "\t" + hit['_source']['title'] )
+
+    print("*********************************************************************************");
+
+
+if __name__=='__main__':
+    # CONSTANTS  
+
+    ## DATA
+    DATA_PATH = '/Users/shiv/Documents/gitRepositories/iutils/input/data/IMDB Dataset.csv'
+    TEXT_COLUMN = 'review'
+
+    ## DATABASE
+    DB_HOST_NAME = 'localhost'
+    DB_PORT = 9201
+
+    ENCODER_PATH = 'https://tfhub.dev/google/universal-sentence-encoder-large/5'
+
+    # Load the data
+    # data = get_data(DATA_PATH, TEXT_COLUMN)
+
+    # Load the encoder
+    _encoder = hub.load(ENCODER_PATH)
+
+    # Setup Database
+    # db_setup(hostname=DB_HOST_NAME, port=DB_PORT)
+
+    # Connect Database
+    db = db_connect(hostname=DB_HOST_NAME, port=DB_PORT)
+
+    # Insert text and encoded text to Database
+    # insert_encoded_data_to_db(db, data, TEXT_COLUMN)
+    
+    # Search new text
+    text_to_search = 'pretty amazing movie'
+    search_by_keyword(db, text_to_search)
+    search_by_vector(db, encode(_encoder, text_to_search))
