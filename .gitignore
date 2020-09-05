@@ -1,5 +1,9 @@
 # Custom ignores
 #
+
+# database
+db/
+
 # datasets
 data/
 
